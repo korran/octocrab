@@ -5,6 +5,8 @@ use crate::models::AppId;
 use crate::Octocrab;
 use crate::Result;
 #[cfg(feature = "jwt")]
+use futures::future::BoxFuture;
+#[cfg(feature = "jwt")]
 #[cfg_attr(docsrs, doc(cfg(feature = "jwt")))]
 pub use jsonwebtoken::EncodingKey;
 #[cfg(feature = "jwt")]
@@ -13,6 +15,8 @@ use secrecy::{ExposeSecret, SecretString};
 use serde::{Deserialize, Serialize};
 #[cfg(feature = "jwt")]
 use std::fmt;
+#[cfg(feature = "jwt")]
+use std::sync::Arc;
 #[cfg(feature = "tokio")]
 use web_time::Duration;
 #[cfg(feature = "jwt")]
@@ -28,8 +32,82 @@ use snafu::*;
 pub struct AppAuth {
     /// Github's app ID
     pub app_id: AppId,
-    /// The app's RSA private key
-    pub key: EncodingKey,
+    /// The app's private key
+    pub key: AppKey,
+}
+
+/// The private key a Github App signs its JWTs with.
+#[cfg(feature = "jwt")]
+#[cfg_attr(docsrs, doc(cfg(feature = "jwt")))]
+#[derive(Clone)]
+#[non_exhaustive]
+pub enum AppKey {
+    /// An RSA private key held in memory.
+    Rsa(EncodingKey),
+    /// A key held outside the process, used through an [`AppSigner`].
+    Signer(Arc<dyn AppSigner>),
+}
+
+#[cfg(feature = "jwt")]
+impl From<EncodingKey> for AppKey {
+    fn from(key: EncodingKey) -> Self {
+        AppKey::Rsa(key)
+    }
+}
+
+#[cfg(feature = "jwt")]
+impl fmt::Debug for AppKey {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            AppKey::Rsa(_) => f.write_str("Rsa(..)"),
+            AppKey::Signer(_) => f.write_str("Signer(..)"),
+        }
+    }
+}
+
+/// Signs Github App JWTs with a private key that octocrab doesn't hold, such as a
+/// key in a cloud KMS or an HSM.
+///
+/// octocrab builds the JWT and calls [`AppSigner::sign`] with its signing input,
+/// `base64url(header) || '.' || base64url(claims)`.
+///
+/// ```no_run
+/// use futures::future::BoxFuture;
+/// use octocrab::{auth::AppSigner, models::AppId, Octocrab};
+///
+/// struct KmsSigner;
+///
+/// impl AppSigner for KmsSigner {
+///     fn sign<'a>(
+///         &'a self,
+///         message: &'a [u8],
+///     ) -> BoxFuture<'a, Result<Vec<u8>, Box<dyn std::error::Error + Send + Sync>>> {
+///         Box::pin(async move {
+///             // Ask the KMS for an RS256 signature of `message`.
+/// #           let _ = message;
+/// #           Ok(Vec::new())
+///         })
+///     }
+/// }
+///
+/// # fn run() -> octocrab::Result<()> {
+/// let octocrab = Octocrab::builder()
+///     .app_with_signer(AppId(42), KmsSigner)
+///     .build()?;
+/// # Ok(())
+/// # }
+/// ```
+#[cfg(feature = "jwt")]
+#[cfg_attr(docsrs, doc(cfg(feature = "jwt")))]
+pub trait AppSigner: Send + Sync {
+    /// Returns the RS256 (RSASSA-PKCS1-v1_5 using SHA-256) signature of `message`,
+    /// as raw bytes.
+    ///
+    /// If the KMS expects a SHA-256 digest, hash `message` first.
+    fn sign<'a>(
+        &'a self,
+        message: &'a [u8],
+    ) -> BoxFuture<'a, Result<Vec<u8>, Box<dyn std::error::Error + Send + Sync>>>;
 }
 
 #[cfg(feature = "jwt")]
@@ -104,12 +182,44 @@ pub fn create_jwt(
     jsonwebtoken::encode(&header, &Claims::new(github_app_id), key)
 }
 
+/// Like [`create_jwt`], but signs the JWT with an [`AppSigner`].
+#[cfg(feature = "jwt")]
+#[cfg_attr(docsrs, doc(cfg(feature = "jwt")))]
+pub async fn create_jwt_with_signer(
+    github_app_id: AppId,
+    signer: &dyn AppSigner,
+) -> Result<String> {
+    use base64::{prelude::BASE64_URL_SAFE_NO_PAD, Engine};
+
+    let header =
+        serde_json::to_vec(&Header::new(Algorithm::RS256)).context(crate::error::SerdeSnafu)?;
+    let claims =
+        serde_json::to_vec(&Claims::new(github_app_id)).context(crate::error::SerdeSnafu)?;
+    let mut jwt = format!(
+        "{}.{}",
+        BASE64_URL_SAFE_NO_PAD.encode(header),
+        BASE64_URL_SAFE_NO_PAD.encode(claims)
+    );
+
+    let signature = signer
+        .sign(jwt.as_bytes())
+        .await
+        .context(crate::error::AppSignerSnafu)?;
+    jwt.push('.');
+    BASE64_URL_SAFE_NO_PAD.encode_string(signature, &mut jwt);
+
+    Ok(jwt)
+}
+
 #[cfg(feature = "jwt")]
 impl AppAuth {
     /// Currently we don't cache these, but we could if we want to avoid
-    /// an RSA signature operation per App-authorized API call.
+    /// a signature operation per App-authorized API call.
     pub async fn generate_bearer_token(&self) -> Result<String> {
-        create_jwt(self.app_id, &self.key).context(crate::error::JWTSnafu)
+        match &self.key {
+            AppKey::Rsa(key) => create_jwt(self.app_id, key).context(crate::error::JWTSnafu),
+            AppKey::Signer(signer) => create_jwt_with_signer(self.app_id, signer.as_ref()).await,
+        }
     }
 }
 

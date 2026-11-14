@@ -1,4 +1,7 @@
+use base64::{prelude::BASE64_URL_SAFE_NO_PAD, Engine};
+use futures::future::BoxFuture;
 use jsonwebtoken::{Algorithm, DecodingKey, EncodingKey, Validation};
+use octocrab::auth::AppSigner;
 use octocrab::models::{AppId, InstallationId};
 use octocrab::Octocrab;
 use serde::Deserialize;
@@ -96,4 +99,72 @@ async fn rsa_key_requests_use_valid_app_jwts() {
         .unwrap();
 
     assert_requests_use_valid_app_jwts(&mock_server, octocrab).await;
+}
+
+/// Signs with the test key the way a KMS holding it would, so octocrab never
+/// sees the key.
+struct TestKeySigner;
+
+impl AppSigner for TestKeySigner {
+    fn sign<'a>(
+        &'a self,
+        message: &'a [u8],
+    ) -> BoxFuture<'a, Result<Vec<u8>, Box<dyn std::error::Error + Send + Sync>>> {
+        Box::pin(async move {
+            let signature = jsonwebtoken::crypto::sign(message, &private_key(), Algorithm::RS256)?;
+            Ok(BASE64_URL_SAFE_NO_PAD.decode(signature)?)
+        })
+    }
+}
+
+struct FailingSigner;
+
+impl AppSigner for FailingSigner {
+    fn sign<'a>(
+        &'a self,
+        _message: &'a [u8],
+    ) -> BoxFuture<'a, Result<Vec<u8>, Box<dyn std::error::Error + Send + Sync>>> {
+        Box::pin(async { Err("signer unavailable".into()) })
+    }
+}
+
+#[tokio::test]
+async fn create_jwt_with_signer_creates_a_valid_app_jwt() {
+    let jwt = octocrab::auth::create_jwt_with_signer(AppId(42), &TestKeySigner)
+        .await
+        .unwrap();
+    assert_valid_app_jwt(&jwt);
+}
+
+#[tokio::test]
+async fn signer_requests_use_valid_app_jwts() {
+    let mock_server = mock_server().await;
+    let octocrab = Octocrab::builder()
+        .base_uri(mock_server.uri())
+        .unwrap()
+        .app_with_signer(AppId(42), TestKeySigner)
+        .build()
+        .unwrap();
+
+    assert_requests_use_valid_app_jwts(&mock_server, octocrab).await;
+}
+
+#[tokio::test]
+async fn signer_errors_are_returned() {
+    let mock_server = MockServer::start().await;
+    let octocrab = Octocrab::builder()
+        .base_uri(mock_server.uri())
+        .unwrap()
+        .app_with_signer(AppId(42), FailingSigner)
+        .build()
+        .unwrap();
+
+    let error = octocrab.apps().installations().send().await.unwrap_err();
+
+    assert!(matches!(error, octocrab::Error::AppSigner { .. }));
+    assert_eq!(
+        error.to_string(),
+        "GitHub App signer error: signer unavailable"
+    );
+    assert!(mock_server.received_requests().await.unwrap().is_empty());
 }

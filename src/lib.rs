@@ -343,6 +343,8 @@ use crate::service::middleware::retry::RetryConfig;
 
 #[cfg(feature = "jwt")]
 use auth::AppAuth;
+#[cfg(feature = "jwt")]
+use auth::AppSigner;
 use auth::Auth;
 #[cfg(feature = "jwt")]
 use models::{AppId, InstallationId, InstallationToken};
@@ -801,7 +803,10 @@ impl OctocrabBuilder<NoSvc, DefaultOctocrabBuilderConfig, NoAuth, NotLayerReady>
     #[cfg(feature = "jwt")]
     #[cfg_attr(docsrs, doc(cfg(feature = "jwt")))]
     pub fn app(mut self, app_id: AppId, key: jsonwebtoken::EncodingKey) -> Self {
-        self.config.auth = Auth::App(AppAuth { app_id, key });
+        self.config.auth = Auth::App(AppAuth {
+            app_id,
+            key: key.into(),
+        });
         self
     }
 
@@ -816,6 +821,18 @@ impl OctocrabBuilder<NoSvc, DefaultOctocrabBuilderConfig, NoAuth, NotLayerReady>
         let key = jsonwebtoken::EncodingKey::from_rsa_pem(pem_bytes.as_ref())
             .context(crate::error::JWTSnafu)?;
         Ok(self.app(app_id, key))
+    }
+
+    /// Authenticate as a Github App whose private key is held outside the process,
+    /// e.g. in a cloud KMS or an HSM, and used through `signer`.
+    #[cfg(feature = "jwt")]
+    #[cfg_attr(docsrs, doc(cfg(feature = "jwt")))]
+    pub fn app_with_signer(mut self, app_id: AppId, signer: impl AppSigner + 'static) -> Self {
+        self.config.auth = Auth::App(AppAuth {
+            app_id,
+            key: auth::AppKey::Signer(Arc::new(signer)),
+        });
+        self
     }
 
     /// Authenticate as a Basic Auth
