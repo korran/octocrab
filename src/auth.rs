@@ -66,6 +66,30 @@ pub enum Auth {
     UserAccessToken(SecretString),
 }
 
+#[cfg(feature = "jwt")]
+#[derive(Serialize)]
+struct Claims {
+    iss: AppId,
+    iat: usize,
+    exp: usize,
+}
+
+#[cfg(feature = "jwt")]
+impl Claims {
+    fn new(github_app_id: AppId) -> Self {
+        let now = SystemTime::UNIX_EPOCH.elapsed().unwrap().as_secs() as usize;
+
+        // Github only allows JWTs that expire in the next 10 minutes.
+        // The token is issued 60 seconds in the past and expires in 9 minutes,
+        // to allow some clock drift.
+        Claims {
+            iss: github_app_id,
+            iat: now - 60,
+            exp: now + (9 * 60),
+        }
+    }
+}
+
 /// Create a JSON Web Token that can be used to authenticate an a GitHub application.
 ///
 /// See: <https://docs.github.com/en/developers/apps/getting-started-with-apps/setting-up-your-development-environment-to-create-a-github-app#authenticating-as-a-github-app>
@@ -75,27 +99,9 @@ pub fn create_jwt(
     github_app_id: AppId,
     key: &EncodingKey,
 ) -> Result<String, jsonwebtoken::errors::Error> {
-    #[derive(Serialize)]
-    struct Claims {
-        iss: AppId,
-        iat: usize,
-        exp: usize,
-    }
-
-    let now = SystemTime::UNIX_EPOCH.elapsed().unwrap().as_secs() as usize;
-
-    // Github only allows JWTs that expire in the next 10 minutes.
-    // The token is issued 60 seconds in the past and expires in 9 minutes,
-    // to allow some clock drift.
-    let claims = Claims {
-        iss: github_app_id,
-        iat: now - 60,
-        exp: now + (9 * 60),
-    };
-
     let header = Header::new(Algorithm::RS256);
 
-    jsonwebtoken::encode(&header, &claims, key)
+    jsonwebtoken::encode(&header, &Claims::new(github_app_id), key)
 }
 
 #[cfg(feature = "jwt")]
