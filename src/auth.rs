@@ -102,7 +102,7 @@ pub fn create_jwt(
 impl AppAuth {
     /// Currently we don't cache these, but we could if we want to avoid
     /// an RSA signature operation per App-authorized API call.
-    pub fn generate_bearer_token(&self) -> Result<String> {
+    pub async fn generate_bearer_token(&self) -> Result<String> {
         create_jwt(self.app_id, &self.key).context(crate::error::JWTSnafu)
     }
 }

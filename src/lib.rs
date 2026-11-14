@@ -2523,10 +2523,11 @@ impl Octocrab {
                 });
             };
         let mut request = Builder::new();
-        let mut sensitive_value =
-            HeaderValue::from_str(format!("Bearer {}", app.generate_bearer_token()?).as_str())
-                .map_err(http::Error::from)
-                .context(HttpSnafu)?;
+        let mut sensitive_value = HeaderValue::from_str(
+            format!("Bearer {}", app.generate_bearer_token().await?).as_str(),
+        )
+        .map_err(http::Error::from)
+        .context(HttpSnafu)?;
 
         let uri = http::Uri::builder()
             .path_and_query(format!("/app/installations/{installation}/access_tokens"))
@@ -2627,7 +2628,7 @@ impl Octocrab {
                     #[cfg(feature = "jwt")]
                     AuthState::App(ref app) => Some(
                         HeaderValue::from_str(
-                            format!("Bearer {}", app.generate_bearer_token()?).as_str(),
+                            format!("Bearer {}", app.generate_bearer_token().await?).as_str(),
                         )
                         .map_err(http::Error::from)
                         .context(HttpSnafu)?,
